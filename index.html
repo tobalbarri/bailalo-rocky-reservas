@@ -45,7 +45,11 @@ label{display:block;font-size:12px;color:#d8c9ed;margin:11px 0 5px}input,select,
 <section id="juegos" class="page hidden"><h2>Catálogo de juegos</h2><div class="card"><form id="gameForm"><div class="formgrid"><div class="span2"><label>Nombre del juego *</label><input id="gameName" required placeholder="Ej. Basket Arcade Pro"></div><div><label>Precio base ($ CLP)</label><input id="gamePrice" type="number" min="0" value="0"></div><div><label>Duración (horas)</label><input id="gameHours" type="number" min="1" value="5"></div></div><button class="btn full" style="margin-top:14px">＋ Agregar juego</button></form></div><div id="gameList" class="list"></div></section>
 <section id="clientes" class="page hidden"><h2>Clientes registrados</h2><div class="card"><form id="clientForm"><label>Nombre completo *</label><input id="clientName" required><label>Teléfono / WhatsApp</label><input id="clientPhone" inputmode="tel"><label>Dirección habitual</label><input id="clientAddress"><button class="btn full" style="margin-top:14px">＋ Guardar cliente</button></form></div><div id="clientList" class="list"></div></section>
 <section id="pagos" class="page hidden"><h2>Control de pagos</h2><div class="notice">Los saldos se calculan a partir del precio total y el abono registrado en cada reserva.</div><div id="paymentList" class="list"></div></section>
-<section id="reportes" class="page hidden"><h2>Reportes</h2><div id="reportSummary" class="stats"></div><div class="card"><h3>☁️ Respaldo completo de la nube</h3><p class="muted" style="font-size:12px;line-height:1.5">Descarga una copia de seguridad directamente desde Supabase. Incluye clientes, juegos, reservas, juegos asociados a reservas y pagos.</p><button class="btn green full" id="backupButton" onclick="exportData()">⬇ Descargar respaldo completo</button><div id="backupStatus" class="notice">Recomendación: descarga y guarda una copia semanal en Google Drive o en un computador seguro.</div><div class="notice">Este respaldo se genera cuando pulsas el botón; no es automático. No compartas el archivo porque contiene datos de tus clientes.</div></div></section>
+<section id="reportes" class="page hidden"><h2>Reportes</h2><div id="reportSummary" class="stats"></div><div class="card"><h3>☁️ Respaldo completo de la nube</h3><p class="muted" style="font-size:12px;line-height:1.5">Descarga una copia de seguridad directamente desde Supabase. Incluye clientes, juegos, reservas, juegos asociados a reservas y pagos.</p><button class="btn green full" id="backupButton" onclick="exportData()">⬇ Descargar respaldo completo</button><div id="backupStatus" class="notice">Recomendación: descarga y guarda una copia semanal en Google Drive o en un computador seguro.</div><label for="restoreFile">Seleccionar archivo de respaldo (.json)</label>
+<input id="restoreFile" type="file" accept=".json,application/json">
+<button class="btn secondary full" id="restoreButton" style="margin-top:10px" onclick="importData()">↥ Restaurar respaldo en la nube</button>
+<div id="restoreStatus" class="notice">Selecciona un respaldo descargado anteriormente. La restauración incorpora o actualiza los registros incluidos en el archivo; no elimina otros registros que no estén en el respaldo.</div>
+<div class="notice">Este respaldo se genera cuando pulsas el botón; no es automático. No compartas el archivo porque contiene datos de tus clientes.</div></div></section>
 <section id="configuracion" class="page hidden"><h2>Configuración</h2><div class="card"><label>Nombre del negocio</label><input id="businessName" value="Entretenciones Báilalo Rocky"><label>Teléfono de contacto del negocio</label><input id="businessPhone" placeholder="+56 9..."><button class="btn full" style="margin-top:14px" onclick="saveSettings()">Guardar configuración</button><div class="notice">La sesión y los datos se gestionan mediante Supabase. Usa la misma cuenta en cada dispositivo para acceder a la información compartida.</div></div></section>
 </main>
 <nav><button class="active" data-page="dashboard" onclick="showPage('dashboard')"><span>🏠</span>Inicio</button><button data-page="reservas" onclick="showPage('reservas')"><span>📋</span>Reservas</button><button data-page="calendario" onclick="showPage('calendario')"><span>🗓️</span>Calendario</button><button data-page="juegos" onclick="showPage('juegos')"><span>🎮</span>Juegos</button><button data-page="configuracion" onclick="showPage('configuracion')"><span>⚙️</span>Más</button></nav>
@@ -165,6 +169,60 @@ async function exportData(){
   btn.disabled=false;btn.textContent='⬇ Descargar respaldo completo';
  }
 }
+async function importData(){
+ const file=$('restoreFile').files?.[0],btn=$('restoreButton'),status=$('restoreStatus');
+ if(!file){alert('Primero selecciona el archivo JSON de respaldo.');return}
+ if(!cloudReady||!sb){alert('Primero inicia sesión y espera a que aparezca “Sincronizado”.');return}
+ if(!confirm('¿Restaurar este respaldo en la nube? Los registros incluidos se incorporarán o actualizarán. Esta acción no se puede deshacer.'))return;
+ btn.disabled=true;btn.textContent='Restaurando…';status.textContent='Leyendo el archivo y preparando los datos. No cierres esta pantalla.';
+ try{
+  const backup=JSON.parse(await file.text());
+  const required=['clientes','juegos','reservas','reserva_juegos','pagos'];
+  if(!backup||!backup.tablas||!required.every(t=>Array.isArray(backup.tablas[t]))){
+   throw new Error('El archivo no tiene el formato de un respaldo completo de Báilalo Rocky.');
+  }
+  const tables=backup.tablas;
+  // Restaurar primero los registros principales para respetar las relaciones.
+  for(const table of ['clientes','juegos','reservas']){
+   const rows=tables[table];
+   if(rows.length){
+    const {error}=await sb.from(table).upsert(rows,{onConflict:'id'});
+    if(error)dbErr(error);
+   }
+  }
+  // Reponer las asociaciones de juegos de cada reserva incluida en el respaldo.
+  const reservationIds=[...new Set(tables.reservas.map(x=>x.id).filter(x=>x!==null&&x!==undefined))];
+  for(const id of reservationIds){
+   const {error}=await sb.from('reserva_juegos').delete().eq('reserva_id',id);
+   if(error)dbErr(error);
+  }
+  if(tables.reserva_juegos.length){
+   const {error}=await sb.from('reserva_juegos').insert(tables.reserva_juegos);
+   if(error)dbErr(error);
+  }
+  if(tables.pagos.length){
+   const {error}=await sb.from('pagos').upsert(tables.pagos,{onConflict:'id'});
+   if(error)dbErr(error);
+  }
+  if(backup.configuracion_local&&typeof backup.configuracion_local==='object'){
+   data.settings={...data.settings,...backup.configuracion_local};
+   localSave();
+  }
+  await cloudLoad();
+  localSave();
+  renderAll();
+  const counts=required.map(t=>`${t}: ${tables[t].length}`).join(' · ');
+  status.textContent=`Restauración completada. ${counts}. Revisa tus reservas, juegos y pagos.`;
+  alert('Respaldo restaurado correctamente.');
+ }catch(e){
+  console.error(e);
+  status.textContent='No se pudo restaurar el respaldo: '+(e.message||e);
+  alert('No se pudo restaurar el respaldo: '+(e.message||e));
+ }finally{
+  btn.disabled=false;btn.textContent='↥ Restaurar respaldo en la nube';
+ }
+}
+
 function saveSettings(){data.settings.businessName=$('businessName').value.trim()||'Entretenciones Báilalo Rocky';data.settings.businessPhone=$('businessPhone').value.trim();save();alert('Configuración guardada.')}
 async function logoutApp(){cloudReady=false;await sb.auth.signOut();$('authGate').classList.remove('hidden');$('logoutButton').style.display='none';setCloudStatus('Sesión cerrada');}
 // Al volver a abrir la pestaña, descarga los cambios guardados desde otro dispositivo.
@@ -172,3 +230,54 @@ document.addEventListener('visibilitychange',async()=>{if(document.visibilitySta
 window.addEventListener('focus',async()=>{if(cloudReady&&$('reservationFormWrap').classList.contains('hidden')){try{await cloudLoad();localSave();renderAll();setCloudStatus('☁️ Datos actualizados')}catch(e){console.error(e);setCloudStatus('⚠️ No se pudo actualizar')}}});
 startApp().catch(e=>{console.error(e);msgLogin(e.message)});
 </script></body></html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
